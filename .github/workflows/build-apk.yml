@@ -1,0 +1,90 @@
+name: Build Watch8 Compact FX APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Compile Wear OS debug APK
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Verify Android SDK 35
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "${ANDROID_HOME:-}" || { echo 'ANDROID_HOME missing'; exit 1; }
+          SDK="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          test -x "$SDK" || { echo 'sdkmanager missing'; exit 1; }
+          if [ ! -f "$ANDROID_HOME/platforms/android-35/android.jar" ] || [ ! -x "$ANDROID_HOME/build-tools/35.0.0/aapt2" ]; then
+            yes | "$SDK" --licenses >/dev/null || true
+            "$SDK" --install 'platforms;android-35' 'build-tools;35.0.0'
+          fi
+
+      - name: Set up Gradle 8.10.2
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.10.2'
+
+      - name: Unpack Android project if ZIP uploaded
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -f settings.gradle ] && [ -f app/build.gradle ]; then
+            echo "PROJECT_DIR=." >> "$GITHUB_ENV"
+          else
+            test -f Watch8_FX_Compact_Source.zip || {
+              echo 'Missing Watch8_FX_Compact_Source.zip'; exit 1;
+            }
+            mkdir -p extracted
+            unzip -q -o Watch8_FX_Compact_Source.zip -d extracted
+            test -f extracted/settings.gradle
+            test -f extracted/app/build.gradle
+            echo "PROJECT_DIR=extracted" >> "$GITHUB_ENV"
+          fi
+
+      - name: Test original currency formulas
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/watch8-fx-unit-tests
+          javac -d /tmp/watch8-fx-unit-tests \
+            "$PROJECT_DIR/app/src/main/java/com/exchange/watchfx/FxCalculator.java" \
+            "$PROJECT_DIR/app/src/main/java/com/exchange/watchfx/UsdtCalculator.java" \
+            "$PROJECT_DIR/tests/FxCalculatorTest.java" \
+            "$PROJECT_DIR/tests/UsdtCalculatorTest.java"
+          java -cp /tmp/watch8-fx-unit-tests FxCalculatorTest
+          java -cp /tmp/watch8-fx-unit-tests UsdtCalculatorTest
+
+      - name: Compile Galaxy Watch8 APK
+        shell: bash
+        run: gradle --no-daemon --stacktrace -p "$PROJECT_DIR" :app:assembleDebug
+
+      - name: Rename built APK
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp "$PROJECT_DIR/app/build/outputs/apk/debug/app-debug.apk" dist/Watch8_FX_Compact-debug.apk
+          sha256sum dist/Watch8_FX_Compact-debug.apk
+
+      - name: Upload installable APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Watch8-FX-Compact-APK
+          path: dist/Watch8_FX_Compact-debug.apk
+          if-no-files-found: error
+          retention-days: 30
